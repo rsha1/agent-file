@@ -1,3 +1,4 @@
+import json
 from letta_client import Letta
 from typing import List
 from pydantic import BaseModel, Field
@@ -36,7 +37,7 @@ def create_research_plan(agent_state: "AgentState", research_plan: List[str], to
     for i, step in enumerate(research_plan):
         research_plan_str += f"Step {i+1} - {step}\n"
 
-    agent_state.memory.update_block_value(label="research", value=json.dumps(research_state))
+    agent_state.memory.update_block_value(label="research", value=json.dumps(research_state, indent=2))
     agent_state.memory.update_block_value(label="research_plan", value=research_plan_str)
 
     # store the topic
@@ -51,7 +52,9 @@ def evaluate_progress(agent_state: "AgentState", complete_research: bool):
     Args:
         complete_research (bool): Whether to complete research. Have all the planned steps been completed? If so, complete.
     """
-    return f"Confirming: research progress is {'complete' if complete_research else 'ongoing'}."
+    # return f"Confirming: research progress is {'complete' if complete_research else 'ongoing'}."
+    # returns the arg so that we can use a conditional tool rule to map
+    return complete_research
 
 
 class ReportSection(BaseModel):
@@ -72,7 +75,9 @@ class Report(BaseModel):
     )
     sections: List[ReportSection] = Field(
         ...,
-        description="The sections of the report.",
+        # description="The sections of the report.",
+        # Extra prompt engineering for Claude, which seems to have a hard time with arrays of objects in schemas
+        description="The sections of the report. This should be a list of dicts, each with a 'title' and 'content' key. sections MUST be an array, not a JSON-encoded string.",
     )
     conclusion: str = Field(
         ...,
@@ -82,6 +87,21 @@ class Report(BaseModel):
         ...,
         description="List of URLs (citations) used in the section.",
     )
+
+
+def prepare_final_report(agent_state: "AgentState", title, sections, conclusion, citations):
+    """Prepare a top-level (summarized) draft report based on the research process you have completed. This draft report should contain all the key findings, insights, and conclusions. You will use this outline to prepare a final report, which will expand the draft report into a full-fledged document."""
+    import json
+
+    report = {
+        "title": title,
+        "sections": [section.model_dump() for section in sections],
+        "conclusion": conclusion,
+        "citations": citations,
+    }
+    agent_state.memory.update_block_value(label="report_outline", value=json.dumps(report, indent=2))
+
+    return "Your report has been successfully stored inside of memory section final_report. Next step: return the completed report to the user using send_message so they can review it. You final report should use proper markdown formatting (make sure to use markdown headings/subheadings, lists, bold, italics, etc., as well as links for citations)."
 
 
 def write_final_report(agent_state: "AgentState", title, sections, conclusion, citations):
@@ -106,6 +126,10 @@ def write_final_report(agent_state: "AgentState", title, sections, conclusion, c
     return "Your report has been successfully stored inside of memory section final_report. Next step: return the completed report to the user using send_message so they can review it (make sure to preserve the markdown formatting, assume the user is using a markdown-compatible viewer)."
 
 
+# check that we have the right environment variables
+assert os.getenv("TAVILY_API_KEY") is not None, "TAVILY_API_KEY is not set"
+assert os.getenv("FIRECRAWL_API_KEY") is not None, "FIRECRAWL_API_KEY is not set"
+
 # create tools
 create_research_plan_tool = client.tools.upsert_from_function(func=create_research_plan)
 analyze_and_search = client.tools.upsert_from_function(
@@ -115,7 +139,10 @@ evaluate_progress_tool = client.tools.upsert_from_function(
     func=evaluate_progress,
 )
 write_final_report_tool = client.tools.upsert_from_function(
-    func=write_final_report, args_schema=Report, return_char_limit=20000  # characters: allow for long report
+    func=write_final_report, args_schema=Report, return_char_limit=50000  # characters: allow for long report
+)
+prepare_final_report_tool = client.tools.upsert_from_function(
+    func=prepare_final_report, args_schema=Report, return_char_limit=50000  # characters: allow for long report
 )
 
 
@@ -125,12 +152,14 @@ agent = client.agents.create(
     name="deep_research_agent",
     description="An agent that always searches the conversation history before responding",
     tool_exec_environment_variables={"TAVILY_API_KEY": os.getenv("TAVILY_API_KEY"), "FIRECRAWL_API_KEY": os.getenv("FIRECRAWL_API_KEY")},
-    tool_ids=[create_research_plan_tool.id, analyze_and_search.id, evaluate_progress_tool.id, write_final_report_tool.id],
+    # tool_ids=[create_research_plan_tool.id, analyze_and_search.id, evaluate_progress_tool.id, write_final_report_tool.id],
+    tool_ids=[create_research_plan_tool.id, analyze_and_search.id, evaluate_progress_tool.id, prepare_final_report_tool.id],
     tools=["send_message"],  # allows for generation of `AssistantMessage`
     memory_blocks=[
         {"label": "research_plan", "value": ""},
         {"label": "research", "value": "", "limit": 50000},  # characters: big limit to be safe
-        {"label": "final_report", "value": "", "limit": 50000},  # characters: big limit to be safe
+        # {"label": "final_report", "value": "", "limit": 50000},  # characters: big limit to be safe
+        {"label": "report_outline", "value": "", "limit": 50000},  # characters: big limit to be safe
     ],
     model="anthropic/claude-3-7-sonnet-20250219",
     embedding="openai/text-embedding-ada-002",
@@ -145,7 +174,8 @@ agent = client.agents.create(
         {
             "type": "conditional",
             "tool_name": "evaluate_progress",
-            "child_output_mapping": {"True": "write_final_report"},
+            # "child_output_mapping": {"True": "write_final_report"},
+            "child_output_mapping": {"True": "prepare_final_report"},
             "default_child": "analyze_and_search_tool",
         },
         {
@@ -154,10 +184,16 @@ agent = client.agents.create(
             "tool_name": "analyze_and_search_tool",
         },
         # {"type": "exit_loop", "tool_name": "write_final_report"},  # alternatively, make write_final_report an exit loop
-        {"type": "constrain_child_tools", "tool_name": "write_final_report", "children": ["send_message"]},
+        # {"type": "constrain_child_tools", "tool_name": "write_final_report", "children": ["send_message"]},
+        {"type": "constrain_child_tools", "tool_name": "prepare_final_report", "children": ["send_message"]},
         {"type": "exit_loop", "tool_name": "send_message"},
     ],
 )
 
 print(agent.id)
 print("tools", [t.name for t in agent.tools])
+
+
+agent_serialized = client.agents.export_agent_serialized(agent_id=agent.id)
+with open("deep_research_agent.af", "w") as f:
+    json.dump(agent_serialized.model_dump(), f, indent=2)
