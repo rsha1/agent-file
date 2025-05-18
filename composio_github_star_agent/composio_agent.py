@@ -1,5 +1,5 @@
 from letta_client import Letta
-from composio_langchain import Action, ComposioToolSet, App
+from composio import Action, ComposioToolSet, App
 
 
 client = Letta(base_url = "http://localhost:8283")
