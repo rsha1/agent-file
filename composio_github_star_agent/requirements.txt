@@ -1,2 +1,2 @@
 letta-client 
-composio_langchain
+composio
