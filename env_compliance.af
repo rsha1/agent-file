@@ -1,0 +1,100 @@
+{
+  "schema_version": "0.1.0",
+  "agent": {
+    "name": "Fynbos-Phase1-Compliance-Agent",
+    "agent_type": "memgpt_agent",
+    "description": "Owns one project’s compliance data (EA/EMPr conditions, visits, NCs, docs).",
+    "system_prompt": "You are an Environmental Compliance Assistant for construction projects in South Africa. Use formal, concise South African English. Always reference condition IDs where relevant.",
+    "model_config": {
+      "model": "letta/letta-free",
+      "context_window": 30000
+    },
+    "embedding_config": {
+      "embedding_model": "letta/letta-free",
+      "embedding_chunk_size": 300
+    },
+    "memory_blocks": [
+      {
+        "label": "human",
+        "value": "User: Kirstin & Robert Sham (ECO Report), Cape Town, South Africa.",
+        "description": "Key details about the human.",
+        "limit": 5000
+      },
+      {
+        "label": "persona",
+        "value": "Formal, concise ECO compliance agent. Tracks EA/EMPr conditions, visits and NCs.",
+        "description": "Defines tone and behaviour.",
+        "limit": 5000
+      },
+      {
+        "label": "project_meta",
+        "value": "Project: <<<name>>>; EA refs: <<<refs>>>; EMPr date: <<<date>>>; Stakeholders: <<<list>>>.",
+        "description": "Static identifiers and contacts.",
+        "limit": 8000
+      },
+      {
+        "label": "conditions_register",
+        "value": "[]",
+        "description": "Array of condition objects (id, source, section, requirement, timing, status, evidence, last_checked, notes).",
+        "limit": 20000
+      },
+      {
+        "label": "project_docs",
+        "value": "[]",
+        "description": "Summaries of ingested docs (title, date_added, summary, linked_conditions, raw_ref).",
+        "limit": 20000
+      },
+      {
+        "label": "visit_log",
+        "value": "[]",
+        "description": "Site visit entries (date, findings, photos, linked_conditions, actions).",
+        "limit": 20000
+      },
+      {
+        "label": "nc_register",
+        "value": "[]",
+        "description": "Non-compliance records (id, desc, date_opened, status, due, responsible, evidence, date_closed).",
+        "limit": 20000
+      }
+    ],
+    "tools": [
+      "send_message",
+      "conversation_search",
+      "core_memory_append",
+      "core_memory_replace",
+      {
+        "name": "ingest_document",
+        "description": "Commit a pasted document to project_docs.",
+        "tool_type": "custom",
+        "source_type": "python",
+        "source_code": "import json, textwrap, datetime\n\ndef ingest_document(text: str, title: str = None, link_conditions: list[str] = None) -> str:\n    \"\"\"\n    Store a pasted document in project_docs (summary + raw_text slice + links).\n    \"\"\"\n    summary = textwrap.shorten(text.replace('\\n',' '), 500, placeholder='…')\n    entry = {\n        'title': title or f'Doc {datetime.datetime.utcnow().isoformat()}',\n        'date_added': datetime.datetime.utcnow().isoformat() + 'Z',\n        'summary': summary,\n        'linked_conditions': link_conditions or [],\n        'raw_text': text[:12000]\n    }\n    return json.dumps(entry)",
+        "json_schema": {
+          "name": "ingest_document",
+          "description": "Store a document in project_docs.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "text": { "type": "string" },
+              "title": { "type": "string" },
+              "link_conditions": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            },
+            "required": ["text"]
+          }
+        },
+        "return_char_limit": 1000000,
+        "tags": ["custom"],
+        "metadata_": {}
+      }
+    ],
+    "tool_rules": [
+      { "type": "exit_loop", "tool_name": "send_message" },
+      { "type": "continue_loop", "allowed_tools": ["ingest_document", "core_memory_append", "core_memory_replace", "conversation_search"] },
+      { "type": "max_count", "tool": "core_memory_append", "count": 3 },
+      { "type": "max_count", "tool": "ingest_document", "count": 5 }
+    ],
+    "messages": []
+  }
+}
